@@ -32,6 +32,7 @@ import torch
 import torch.utils.data
 import sys
 from scipy.io.wavfile import read
+import librosa
 
 # We're using the audio processing from TacoTron2 to make sure it matches
 sys.path.insert(0, 'tacotron2')
@@ -49,11 +50,14 @@ def files_to_list(filename):
     files = [f.rstrip() for f in files]
     return files
 
-def load_wav_to_torch(full_path):
+def load_wav_to_torch(full_path, use_librosa = False, sr=None):
     """
     Loads wavdata into torch array
     """
-    sampling_rate, data = read(full_path)
+    if use_librosa :
+        sampling_rate, data = librosa.load(full_path, sr=sr)
+    else :
+        sampling_rate, data = read(full_path)
     return torch.from_numpy(data).float(), sampling_rate
 
 
@@ -88,9 +92,11 @@ class Mel2Samp(torch.utils.data.Dataset):
         filename = self.audio_files[index]
         audio, sampling_rate = load_wav_to_torch(filename)
         if sampling_rate != self.sampling_rate:
+            audio, sampling_rate = load_wav_to_torch(filename, True, self.sampling_rate)
+            '''
             raise ValueError("{} SR doesn't match target {} SR".format(
                 sampling_rate, self.sampling_rate))
-
+            '''
         # Take segment
         if audio.size(0) >= self.segment_length:
             max_audio_start = audio.size(0) - self.segment_length
