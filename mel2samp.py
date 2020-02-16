@@ -55,7 +55,7 @@ def load_wav_to_torch(full_path, use_librosa = False, sr=None):
     Loads wavdata into torch array
     """
     if use_librosa :
-        sampling_rate, data = librosa.load(full_path, sr=sr)
+        data, samplig_rate = librosa.load(full_path, sr=sr)
     else :
         sampling_rate, data = read(full_path)
     return torch.from_numpy(data).float(), sampling_rate
