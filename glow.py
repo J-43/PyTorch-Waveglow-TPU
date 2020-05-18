@@ -154,7 +154,7 @@ class WN(torch.nn.Module):
         audio, spect = forward_input
         audio = self.start(audio)
         output = torch.zeros_like(audio)
-        n_channels_tensor = torch.IntTensor([self.n_channels])
+        n_channels_tensor = torch.IntTensor([self.n_channels]).to(torch.device(self.end.weight.device))
 
         spect = self.cond_layer(spect)
 

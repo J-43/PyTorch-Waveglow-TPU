@@ -28,7 +28,9 @@ import argparse
 import json
 import os
 import torch
-
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.distributed.xla_multiprocessing as xmp
 #=====START: ADDED FOR DISTRIBUTED======
 from distributed import init_distributed, apply_gradient_allreduce, reduce_tensor
 from torch.utils.data.distributed import DistributedSampler
@@ -52,25 +54,26 @@ def load_checkpoint(checkpoint_path, model, optimizer):
 def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
     print("Saving model and optimizer state at iteration {} to {}".format(
           iteration, filepath))
-    model_for_saving = WaveGlow(**waveglow_config).cuda()
+    model_for_saving = WaveGlow(**waveglow_config) #.cuda()
     model_for_saving.load_state_dict(model.state_dict())
     torch.save({'model': model_for_saving,
                 'iteration': iteration,
                 'optimizer': optimizer.state_dict(),
                 'learning_rate': learning_rate}, filepath)
 
-def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
+def train(i, num_gpus, rank, group_name, output_directory, epochs, learning_rate,
           sigma, iters_per_checkpoint, batch_size, seed, fp16_run,
           checkpoint_path, with_tensorboard):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    #torch.cuda.manual_seed(seed)
     #=====START: ADDED FOR DISTRIBUTED======
     if num_gpus > 1:
         init_distributed(rank, num_gpus, group_name, **dist_config)
     #=====END:   ADDED FOR DISTRIBUTED======
+    device = xm.xla_device()
 
     criterion = WaveGlowLoss(sigma)
-    model = WaveGlow(**waveglow_config).cuda()
+    model = WaveGlow(**waveglow_config) #.cuda()
 
     #=====START: ADDED FOR DISTRIBUTED======
     if num_gpus > 1:
@@ -89,25 +92,29 @@ def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
         model, optimizer, iteration = load_checkpoint(checkpoint_path, model,
                                                       optimizer)
         iteration += 1  # next iteration is iteration + 1
-
+    
+    model = model.to(device)
+    
     trainset = Mel2Samp(**data_config)
     # =====START: ADDED FOR DISTRIBUTED======
-    train_sampler = DistributedSampler(trainset) if num_gpus > 1 else None
+    train_sampler = DistributedSampler(trainset, rank=xm.get_ordinal(), num_replicas=xm.xrt_world_size()) #if num_gpus > 1 else None
     # =====END:   ADDED FOR DISTRIBUTED======
     train_loader = DataLoader(trainset, num_workers=1, shuffle=False,
                               sampler=train_sampler,
                               batch_size=batch_size,
-                              pin_memory=False,
+                              pin_memory=True,
                               drop_last=True)
 
+    xla_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+    
     # Get shared output_directory ready
-    if rank == 0:
+    if xm.is_master_ordinal():
         if not os.path.isdir(output_directory):
             os.makedirs(output_directory)
             os.chmod(output_directory, 0o775)
         print("output directory", output_directory)
 
-    if with_tensorboard and rank == 0:
+    if with_tensorboard and xm.is_master_ordinal():
         from tensorboardX import SummaryWriter
         logger = SummaryWriter(os.path.join(output_directory, 'logs'))
 
@@ -117,14 +124,16 @@ def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
     for epoch in range(epoch_offset, epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
-            model.zero_grad()
+            optimizer.zero_grad()
 
             mel, audio = batch
-            mel = torch.autograd.Variable(mel.cuda())
-            audio = torch.autograd.Variable(audio.cuda())
+            mel , audio=  mel.to(device), audio.to(device)#torch.autograd.Variable(mel.cuda())
+            mel.requires_grad, audio.requires_grad = True, True #torch.autograd.Variable(audio.cuda())
+            
             outputs = model((mel, audio))
 
             loss = criterion(outputs)
+            
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
@@ -136,14 +145,14 @@ def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
             else:
                 loss.backward()
 
-            optimizer.step()
+            xm.optimizer_step(optimizer)
 
             print("{}:\t{:.9f}".format(iteration, reduced_loss))
-            if with_tensorboard and rank == 0:
+            if with_tensorboard and xm.is_master_ordinal() :
                 logger.add_scalar('training_loss', reduced_loss, i + len(train_loader) * epoch)
 
             if (iteration % iters_per_checkpoint == 0):
-                if rank == 0:
+                if xm.is_master_ordinal() :
                     checkpoint_path = "{}/waveglow_{}".format(
                         output_directory, iteration)
                     save_checkpoint(model, optimizer, learning_rate, iteration,
@@ -173,7 +182,7 @@ if __name__ == "__main__":
     global waveglow_config
     waveglow_config = config["waveglow_config"]
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = 0 #torch.cuda.device_count()
     if num_gpus > 1:
         if args.group_name == '':
             print("WARNING: Multiple GPUs detected but no distributed group set")
@@ -183,6 +192,9 @@ if __name__ == "__main__":
     if num_gpus == 1 and args.rank != 0:
         raise Exception("Doing single GPU training on rank > 0")
 
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = False
-    train(num_gpus, args.rank, args.group_name, **train_config)
+    #torch.backends.cudnn.enabled = True
+    #torch.backends.cudnn.benchmark = False
+    c = train_config
+    xmp.spawn(train, (num_gpus, args.rank, args.group_name, c['output_directory'], c['epochs'], c['learning_rate'],
+          c['sigma'], c['iters_per_checkpoint'], c['batch_size'], c['seed'], c['fp16_run'],
+          c['checkpoint_path'], c['with_tensorboard'] ), nprocs=1, start_method='fork')
