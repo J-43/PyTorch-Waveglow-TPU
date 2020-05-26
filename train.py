@@ -144,10 +144,12 @@ def train(i, num_gpus, rank, group_name, output_directory, epochs, learning_rate
                     scaled_loss.backward()
             else:
                 loss.backward()
+                if xm.is_master_ordinal() :
+                    print("{}:\t{:.9f}".format(iteration, loss.item()))
 
             xm.optimizer_step(optimizer, barrier=True)
-
-            print("{}:\t{:.9f}".format(iteration, reduced_loss))
+            
+            #print("{}:\t{:.9f}".format(iteration, reduced_loss))
             if with_tensorboard and xm.is_master_ordinal() :
                 logger.add_scalar('training_loss', reduced_loss, i + len(train_loader) * epoch)
 
