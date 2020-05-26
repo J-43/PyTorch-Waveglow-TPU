@@ -145,7 +145,7 @@ def train(i, num_gpus, rank, group_name, output_directory, epochs, learning_rate
             else:
                 loss.backward()
 
-            xm.optimizer_step(optimizer)
+            xm.optimizer_step(optimizer, barrier=True)
 
             print("{}:\t{:.9f}".format(iteration, reduced_loss))
             if with_tensorboard and xm.is_master_ordinal() :
